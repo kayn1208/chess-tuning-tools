@@ -114,9 +114,9 @@ class TuningClient(object):
             f"score={cutechess_options['resign_score']}",
             "-rounds",
             f"{cutechess_options['rounds']}",
-            "-repeat",
+            "-noswap",
             "-games",
-            "2",
+            "1",
             "-pgnout",
             "out.pgn",
         ]

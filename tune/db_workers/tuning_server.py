@@ -44,7 +44,7 @@ from tune.db_workers.utils import (
     get_session_maker,
 )
 from tune.io import InitStrings
-from tune.local import counts_to_penta
+from tune.local import counts_to_wdl
 from tune.priors import roundflat
 from tune.utils import expected_ucb
 
@@ -268,7 +268,7 @@ class TuningServer(object):
                         result.ll_count,
                     ]
                 )
-                score, variance = counts_to_penta(
+                score, variance = counts_to_wdl(
                     counts=counts, random_state=0, n_dirichlet_samples=100000
                 )
                 y[tc].append(score)

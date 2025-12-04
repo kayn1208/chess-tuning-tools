@@ -36,6 +36,7 @@ from tune.summary import confidence_intervals
 from tune.utils import TimeControl, confidence_to_mult, expected_ucb
 
 __all__ = [
+    "counts_to_wdl",
     "counts_to_penta",
     "initialize_optimizer",
     "run_match",
@@ -104,57 +105,6 @@ def prob_to_elo(p: np.ndarray, k: float = 4.0) -> np.ndarray:
     if k <= 0:
         raise ValueError("k must be positive")
     return np.atleast_1d(k * np.log10(-p / (p - 1)))
-
-
-def counts_to_penta(
-    counts: np.ndarray,
-    prior_counts: Optional[Iterable[float]] = None,
-    n_dirichlet_samples: int = 1000000,
-    score_scale: float = 4.0,
-    random_state: Union[int, RandomState, None] = None,
-    **kwargs,
-) -> Tuple[float, float]:
-    """Compute mean Elo score and variance of the pentanomial model for a count array.
-
-    Parameters
-    ----------
-    counts : np.ndarray
-        Array of counts for WW, WD, WL/DD, LD and LL
-    prior_counts : np.ndarray or None, default=None
-        Pseudo counts to use for WW, WD, WL/DD, LD and LL in the
-        pentanomial model.
-    n_dirichlet_samples : int, default = 1 000 000
-        Number of samples to draw from the Dirichlet distribution in order to
-        estimate the standard error of the score.
-    score_scale : float, optional (default=4.0)
-        Scale of the logistic distribution used to calculate the score. Has to be a
-        positive real number
-    random_state : int, RandomState instance or None, optional (default: None)
-        The generator used to initialize the centers. If int, random_state is
-        the seed used by the random number generator; If RandomState instance,
-        random_state is the random number generator; If None, the random number
-        generator is the RandomState instance used by `np.random`.
-    kwargs : dict
-        Additional keyword arguments
-    Returns
-    -------
-    tuple (float, float)
-        Mean Elo score and corresponding variance
-    """
-    if prior_counts is None:
-        prior_counts = np.array([0.14, 0.19, 0.34, 0.19, 0.14]) * 2.5
-    else:
-        prior_counts = np.array(prior_counts)
-        if len(prior_counts) != 5:
-            raise ValueError("Argument prior_counts should contain 5 elements.")
-    dist = dirichlet(alpha=counts + prior_counts)
-    scores = [0.0, 0.25, 0.5, 0.75, 1.0]
-    score = float(prob_to_elo(dist.mean().dot(scores), k=score_scale))
-    error = prob_to_elo(
-        dist.rvs(n_dirichlet_samples, random_state=random_state).dot(scores),
-        k=score_scale,
-    ).var()
-    return score, error
 
 
 def setup_logger(verbose: int = 0, logfile: str = "log.txt") -> Logger:
@@ -901,8 +851,8 @@ def run_match(
         string_array.extend(("-tb", str(tb_path_object)))
 
     string_array.extend(("-rounds", f"{rounds}"))
-    string_array.extend(("-games", "2"))
-    string_array.append("-repeat")
+    string_array.extend(("-games", "1"))
+    string_array.append("-noswap")
     string_array.append("-recover")
     string_array.append("-debug")
     string_array.extend(("-pgnout", "out.pgn"))
@@ -991,6 +941,68 @@ def check_log_for_errors(
             )
 
 
+def counts_to_wdl(
+    counts: np.ndarray,
+    prior_counts: Optional[Iterable[float]] = None,
+    n_dirichlet_samples: int = 1000000,
+    score_scale: float = 4.0,
+    random_state: Union[int, RandomState, None] = None,
+    **kwargs: Any,
+) -> Tuple[float, float]:
+    """Compute mean Elo score and variance of the **trinomial model** for a count array.
+
+    Scores used are **[+1.0, 0.0, -1.0]** for **[W, D, L]** (Zero-centered).
+
+    Parameters
+    ----------
+    counts : np.ndarray
+        Array of counts for **W, D, L** (Win, Draw, Loss).
+    prior_counts : np.ndarray or None, default=None
+        Pseudo counts to use for **W, D, L** in the trinomial model.
+    n_dirichlet_samples : int, default = 1 000 000
+        Number of samples to draw from the Dirichlet distribution.
+    score_scale : float, optional (default=4.0)
+        Scale of the logistic distribution used to calculate the score.
+    random_state : int, RandomState instance or None, optional (default: None)
+        The generator used for sampling.
+    Returns
+    -------
+    tuple (float, float)
+        Mean Elo score (centered at 0.0) and corresponding variance.
+    """
+    if prior_counts is None:
+        prior_counts = np.array([0.33, 0.34, 0.33]) * 3.0
+    else:
+        prior_counts = np.array(prior_counts)
+        if len(prior_counts) != 3:
+            raise ValueError("Argument prior_counts should contain 3 elements for W, D, L.")
+            
+    # Alpha parameters for the Dirichlet distribution (W, D, L)
+    dist = dirichlet(alpha=counts + prior_counts)
+    
+    # *** Zero-Centered Scores for W=1.0, D=0.0, L=-1.0 ***
+    scores_zero_centered = [1.0, 0.0, -1.0]
+    
+    # 1. Calculate the mean expected score (E_prime) which is in [-1.0, 1.0]
+    E_prime = dist.mean().dot(scores_zero_centered)
+    
+    # 2. Convert E_prime back to the standard [0.0, 1.0] probability (E) for prob_to_elo
+    # Transformation: E_prime = 2*E - 1  =>  E = (E_prime + 1) / 2
+    E = (E_prime + 1.0) / 2.0
+    
+    # Mean Elo score
+    score = float(prob_to_elo(E, k=score_scale))
+    
+    # Estimate error (variance of Elo scores from Dirichlet samples)
+    E_primes_samples = dist.rvs(n_dirichlet_samples, random_state=random_state).dot(scores_zero_centered)
+    E_samples = (E_primes_samples + 1.0) / 2.0
+    
+    error = prob_to_elo(E_samples, k=score_scale).var()
+    
+    return score, error
+
+# --- Parsing Function ---
+
 def parse_experiment_result(
     outstr: str,
     prior_counts: Optional[Sequence[float]] = None,
@@ -999,83 +1011,50 @@ def parse_experiment_result(
     random_state: Union[int, RandomState, None] = None,
     **kwargs: Any,
 ) -> Tuple[float, float, float]:
-    """Parse cutechess-cli result output to extract mean score and error.
-
-    Here we use a simple pentanomial model to exploit paired openings.
-    We distinguish the outcomes WW, WD, WL/DD, LD and LL and apply the
-    following scoring (note, that the optimizer always minimizes the score):
-
-    +------+------+-------+-----+-----+
-    | WW   | WD   | WL/DD | LD  | LL  |
-    +======+======+=======+=====+=====+
-    | -1.0 | -0.5 | 0.0   | 0.5 | 1.0 |
-    +------+------+-------+-----+-----+
-
-    Note: It is important that the match output was produced using
-    cutechess-cli using paired openings, otherwise the returned score is
-    useless.
+    """Parse cutechess-cli result output to extract mean score and error using a **trinomial model** (single games).
 
     Parameters
     ----------
     output : string (utf-8)
-        Match output of cutechess-cli. It assumes the output was coming from
-        a head-to-head match with paired openings.
+        Match output of cutechess-cli. Assumes a head-to-head match where W-D-L
+        counts are reported.
     prior_counts : list-like float or int, default=None
-        Pseudo counts to use for WW, WD, WL/DD, LD and LL in the
-        pentanomial model.
+        Pseudo counts to use for **W, D, L** in the trinomial model.
     n_dirichlet_samples : int, default = 1 000 000
-        Number of samples to draw from the Dirichlet distribution in order to
-        estimate the standard error of the score.
+        Number of samples to draw from the Dirichlet distribution.
     score_scale : float, optional (default=4.0)
-        Scale of the logistic distribution used to calculate the score. Has to be a
-        positive real number
+        Scale of the logistic distribution used to calculate the score.
     random_state : int, RandomState instance or None, optional (default: None)
-        The generator used to initialize the centers. If int, random_state is
-        the seed used by the random number generator; If RandomState instance,
-        random_state is the random number generator; If None, the random number
-        generator is the RandomState instance used by `np.random`.
+        The generator used for sampling.
     Returns
     -------
-    score : float (in [-1, 1])
-        Expected (negative) score of the first player (the lower the stronger)
+    score : float
+        Estimated mean Elo score difference (centered at 0.0).
     error : float
-        Estimated standard error of the score. Estimated by repeated draws
-        from a Dirichlet distribution.
+        Estimated standard error of the score.
     draw_rate : float
         Estimated draw rate of the match.
     """
+    # Find the final W-D-L score line (e.g., "Score of...: 100 - 50 - 50")
     wdl_strings = re.findall(r"Score of.*:\s*([0-9]+\s-\s[0-9]+\s-\s[0-9]+)", outstr)
-    array = np.array(
-        [np.array([int(y) for y in re.findall(r"[0-9]+", x)]) for x in wdl_strings]
-    )
-    diffs = np.diff(array, axis=0, prepend=np.array([[0, 0, 0]]))
-
-    # Parse order of finished games to be able to compute the correct pentanomial scores
-    finished = np.array(
-        [int(x) - 1 for x in re.findall(r"Finished game ([0-9]+)", outstr)]
-    )
-    diffs = diffs[np.argsort(finished)]
-
-    counts = {"WW": 0, "WD": 0, "WL/DD": 0, "LD": 0, "LL": 0}
-    DD = 0  # Track DD separately to compute draw rate
-    for i in range(0, len(diffs) - 1, 2):
-        match = diffs[i] + diffs[i + 1]
-        if match[0] == 2:
-            counts["WW"] += 1
-        elif match[0] == 1:
-            if match[1] == 1:
-                counts["WL/DD"] += 1
-            else:
-                counts["WD"] += 1
-        elif match[1] == 1:
-            counts["LD"] += 1
-        elif match[2] == 2:
-            counts["WL/DD"] += 1
-            DD += 1
-        else:
-            counts["LL"] += 1
-    counts_array = np.array(list(counts.values()))
-    score, error = counts_to_penta(
+    
+    if not wdl_strings:
+        raise ValueError("Could not find W-D-L score in the output string.")
+        
+    # Use the last reported score (the final total)
+    final_score_str = wdl_strings[-1]
+    
+    # Extract W, D, L counts as integers in the order [W, D, L]
+    counts_array = np.array([int(y) for y in re.findall(r"[0-9]+", final_score_str)])
+    
+    total_games = counts_array.sum()
+    
+    if total_games == 0:
+        print("Warning: No games found in the output. Returning neutral score and high error.")
+        return 0.0, float('inf'), 0.0
+        
+    # Calculate score and error using the trinomial model
+    score, error = counts_to_wdl(
         counts=counts_array,
         prior_counts=prior_counts,
         n_dirichlet_samples=n_dirichlet_samples,
@@ -1083,9 +1062,10 @@ def parse_experiment_result(
         random_state=random_state,
         **kwargs,
     )
-    draw_rate = (DD + 0.5 * counts["WD"] + 0.5 * counts["LD"] + 1.0) / (
-        counts_array.sum() + 3.0
-    )
+
+    # Calculate draw rate (D / (W + D + L)) with pseudo-counts
+    draw_rate = (counts_array[1] + 1.0) / (total_games + 3.0)
+    
     return score, error, draw_rate
 
 
